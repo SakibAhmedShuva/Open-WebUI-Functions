@@ -14,42 +14,104 @@ import time
 from typing import List, Union, Generator, Dict
 from pydantic import BaseModel, Field
 
+# ========================================
+# CONFIGURATION VARIABLES - EDIT HERE
+# ========================================
+
+# Bot/Service Identity (BOT_NAME will be auto-generated from URL)
+BOT_NAME = None  # Will be auto-detected from HUGGINGFACE_SPACE_URL
+BOT_DISPLAY_NAME = "MyBot: "  # Fixed display name to avoid duplication
+BOT_ID_SUFFIX = "hf-space"  # Will be combined with detected name
+BOT_TYPE = "manifold"
+
+# API Configuration
+DEFAULT_SPACE_URL = "https://dungpham519-rag.hf.space"
+DEFAULT_AUTH_TOKEN = "LULA"
+DEFAULT_TIMEOUT = 30
+DEFAULT_MAX_RETRIES = 3
+
+# Cache Settings
+DEFAULT_CACHE_MODELS = True
+DEFAULT_CACHE_DURATION = 300  # 5 minutes in seconds
+
+# Debug and Rate Limiting
+DEFAULT_DEBUG = False
+RATE_LIMIT_DELAY = 1.0  # seconds between requests
+
+# API Endpoints
+MODELS_ENDPOINT = "/v1/models"
+CHAT_ENDPOINT = "/v1/chat/completions"
+HEALTH_ENDPOINT = "/health"
+
+# Model Naming (will be auto-generated)
+MODEL_PREFIX = None  # Will be set based on detected BOT_NAME
+MODEL_DISPLAY_PREFIX = ""  # Empty to avoid duplication since BOT_NAME is used elsewhere
+
+# Default Model Configuration
+DEFAULT_TEMPERATURE = 0.7
+DEFAULT_MAX_TOKENS = 1000
+DEFAULT_TOP_P = 1.0
+
+# Fallback Models (will be populated after BOT_NAME detection)
+FALLBACK_MODELS = []  # Will be set in __init__ after name detection
+
+# ========================================
+# MAIN PIPE CLASS
+# ========================================
+
 
 class Pipe:
     class Valves(BaseModel):
         """Configuration for My Hugging Face Space API."""
 
         HUGGINGFACE_SPACE_URL: str = Field(
-            default="https://dungpham519-rag.hf.space",
+            default=DEFAULT_SPACE_URL,
             description="Base URL for MyHuggingFace Hugging Face Space",
         )
 
         AUTHORIZATION_TOKEN: str = Field(
-            default="LULA",
+            default=DEFAULT_AUTH_TOKEN,
             description="Bearer token for API authentication",
         )
 
-        TIMEOUT: int = Field(default=30, description="Request timeout in seconds")
-
-        MAX_RETRIES: int = Field(
-            default=3, description="Maximum number of retry attempts"
+        TIMEOUT: int = Field(
+            default=DEFAULT_TIMEOUT, description="Request timeout in seconds"
         )
 
-        DEBUG: bool = Field(default=False, description="Enable debug logging")
+        MAX_RETRIES: int = Field(
+            default=DEFAULT_MAX_RETRIES, description="Maximum number of retry attempts"
+        )
+
+        DEBUG: bool = Field(default=DEFAULT_DEBUG, description="Enable debug logging")
 
         CACHE_MODELS: bool = Field(
-            default=True, description="Cache model list to reduce API calls"
+            default=DEFAULT_CACHE_MODELS,
+            description="Cache model list to reduce API calls",
         )
 
         CACHE_DURATION: int = Field(
-            default=300, description="Model cache duration in seconds (5 minutes)"
+            default=DEFAULT_CACHE_DURATION,
+            description="Model cache duration in seconds (5 minutes)",
         )
 
     def __init__(self):
         """Initialize the My Hugging Face Space pipe."""
-        self.type = "manifold"
-        self.id = "MyHuggingFace-hf-space"
-        self.name = "MyHuggingFace"
+        # Initialize valves first to get the URL
+        self.valves = self.Valves()
+
+        # Auto-detect bot name from URL
+        self._detect_bot_name()
+
+        # Set up identity
+        self.type = BOT_TYPE
+        self.id = f"{self.bot_name}-{BOT_ID_SUFFIX}"
+        self.name = BOT_DISPLAY_NAME  # Use fixed display name
+
+        # Set up model naming
+        self.model_prefix = f"{self.bot_name}-"
+
+        # Set up fallback models
+        self._setup_fallback_models()
 
         # Rate limiting
         self.last_request_time = 0.0
@@ -58,9 +120,6 @@ class Pipe:
         self._cached_models = None
         self._cache_timestamp = 0
 
-        # Initialize valves
-        self.valves = self.Valves()
-
         # Set up headers
         self.headers = {
             "Authorization": f"Bearer {self.valves.AUTHORIZATION_TOKEN}",
@@ -68,10 +127,63 @@ class Pipe:
             "Accept": "application/json",
         }
 
+    def _detect_bot_name(self):
+        """Auto-detect bot name from the Hugging Face Space URL."""
+        url = self.valves.HUGGINGFACE_SPACE_URL
+
+        # Extract name from URL like https://dungpham519-rag.hf.space
+        try:
+            # Remove protocol
+            if "://" in url:
+                url = url.split("://")[1]
+
+            # Get the subdomain part before .hf.space
+            if ".hf.space" in url:
+                subdomain = url.split(".hf.space")[0]
+                # Clean up the name and capitalize appropriately
+                bot_name = subdomain.replace("-", " ").title().replace(" ", "")
+                self.bot_name = bot_name
+                self._debug(f"Auto-detected bot name: {self.bot_name}", "INIT")
+            else:
+                # Fallback: try to extract from domain
+                domain_parts = url.split(".")
+                if len(domain_parts) > 0:
+                    self.bot_name = domain_parts[0].replace("-", "").title()
+                else:
+                    self.bot_name = "HuggingFaceSpace"
+                self._debug(f"Using fallback bot name: {self.bot_name}", "INIT")
+
+        except Exception as e:
+            self.bot_name = "HuggingFaceSpace"
+            self._debug(
+                f"Failed to detect bot name, using default: {self.bot_name}. Error: {str(e)}",
+                "WARNING",
+            )
+
+    def _setup_fallback_models(self):
+        """Set up fallback models using the detected bot name."""
+        self.fallback_models = [
+            {
+                "id": f"{self.model_prefix}default",
+                "name": "Default Model",  # FIXED: Removed duplicate prefix
+                "description": f"Default model from {self.bot_name} Hugging Face Space",
+                "type": "chat",
+                "original_id": "default",
+            },
+            {
+                "id": f"{self.model_prefix}chat",
+                "name": "Chat Model",  # FIXED: Removed duplicate prefix
+                "description": f"Chat model from {self.bot_name} Space",
+                "type": "chat",
+                "original_id": "chat",
+            },
+        ]
+
     def _debug(self, message: str, category: str = "INFO") -> None:
         """Debug logging helper."""
         if self.valves.DEBUG:
-            print(f"[MyHuggingFacePipe][{category}] {message}")
+            bot_name = getattr(self, "bot_name", "HuggingFaceSpace")
+            print(f"[{bot_name}Pipe][{category}] {message}")
 
     def _get_headers(self) -> Dict[str, str]:
         """Generate headers for API requests."""
@@ -86,8 +198,8 @@ class Pipe:
         current_time = time.time()
         elapsed = current_time - self.last_request_time
 
-        if elapsed < 1.0:  # Wait at least 1 second between requests
-            time.sleep(1.0 - elapsed)
+        if elapsed < RATE_LIMIT_DELAY:
+            time.sleep(RATE_LIMIT_DELAY - elapsed)
 
         self.last_request_time = time.time()
 
@@ -109,7 +221,7 @@ class Pipe:
 
             # Try the standard OpenAI-compatible models endpoint
             response = requests.get(
-                f"{self.valves.HUGGINGFACE_SPACE_URL}/v1/models",
+                f"{self.valves.HUGGINGFACE_SPACE_URL}{MODELS_ENDPOINT}",
                 headers=self._get_headers(),
                 timeout=self.valves.TIMEOUT,
             )
@@ -131,8 +243,8 @@ class Pipe:
 
                         models.append(
                             {
-                                "id": f"MyHuggingFace-{model_id}",
-                                "name": f"MyHuggingFace: {display_name}",
+                                "id": f"{self.model_prefix}{model_id}",
+                                "name": display_name,  # FIXED: Removed duplicate prefix
                                 "description": f"Model: {model_name}",
                                 "type": "chat",
                                 "original_id": model_id,
@@ -147,8 +259,8 @@ class Pipe:
                         )
                         models.append(
                             {
-                                "id": f"MyHuggingFace-{model_name}",
-                                "name": f"MyHuggingFace: {display_name}",
+                                "id": f"{self.model_prefix}{model_name}",
+                                "name": display_name,  # FIXED: Removed duplicate prefix
                                 "description": f"Model: {model_name}",
                                 "type": "chat",
                                 "original_id": model_name,
@@ -167,8 +279,8 @@ class Pipe:
 
                         models.append(
                             {
-                                "id": f"MyHuggingFace-{model_id}",
-                                "name": f"MyHuggingFace: {display_name}",
+                                "id": f"{self.model_prefix}{model_id}",
+                                "name": display_name,  # FIXED: Removed duplicate prefix
                                 "description": f"Model: {model_id}",
                                 "type": "chat",
                                 "original_id": model_id,
@@ -201,22 +313,7 @@ class Pipe:
     def _get_fallback_models(self) -> List[dict]:
         """Return fallback models if API is unavailable."""
         self._debug("Using fallback models", "FALLBACK")
-        return [
-            {
-                "id": "MyHuggingFace-default",
-                "name": "MyHuggingFace: Default Model",
-                "description": "Default model from MyHuggingFace Hugging Face Space",
-                "type": "chat",
-                "original_id": "default",
-            },
-            {
-                "id": "MyHuggingFace-chat",
-                "name": "MyHuggingFace: Chat Model",
-                "description": "Chat model from MyHuggingFace Space",
-                "type": "chat",
-                "original_id": "chat",
-            },
-        ]
+        return self.fallback_models
 
     def pipes(self) -> List[dict]:
         """
@@ -243,8 +340,8 @@ class Pipe:
 
     def _get_original_model_id(self, openwebui_model_id: str) -> str:
         """Extract original model ID from OpenWebUI model ID."""
-        if openwebui_model_id.startswith("MyHuggingFace-"):
-            return openwebui_model_id[14:]  # Remove "MyHuggingFace-" prefix
+        if openwebui_model_id.startswith(self.model_prefix):
+            return openwebui_model_id[len(self.model_prefix) :]
         return openwebui_model_id
 
     def pipe(self, body: dict) -> Union[str, Generator[str, None, None]]:
@@ -258,7 +355,7 @@ class Pipe:
             Response content either as string or streaming generator
         """
         try:
-            model = body.get("model", "MyHuggingFace-default")
+            model = body.get("model", f"{self.model_prefix}default")
             messages = body.get("messages", [])
             stream = body.get("stream", False)
 
@@ -275,9 +372,9 @@ class Pipe:
                 "model": original_model_id,
                 "messages": messages,
                 "stream": stream,
-                "temperature": body.get("temperature", 0.7),
-                "max_tokens": body.get("max_tokens", 1000),
-                "top_p": body.get("top_p", 1.0),
+                "temperature": body.get("temperature", DEFAULT_TEMPERATURE),
+                "max_tokens": body.get("max_tokens", DEFAULT_MAX_TOKENS),
+                "top_p": body.get("top_p", DEFAULT_TOP_P),
             }
 
             if stream:
@@ -295,7 +392,7 @@ class Pipe:
 
         try:
             response = requests.post(
-                f"{self.valves.HUGGINGFACE_SPACE_URL}/v1/chat/completions",
+                f"{self.valves.HUGGINGFACE_SPACE_URL}{CHAT_ENDPOINT}",
                 json=payload,
                 headers=self._get_headers(),
                 stream=True,
@@ -342,7 +439,7 @@ class Pipe:
         for attempt in range(self.valves.MAX_RETRIES):
             try:
                 response = requests.post(
-                    f"{self.valves.HUGGINGFACE_SPACE_URL}/v1/chat/completions",
+                    f"{self.valves.HUGGINGFACE_SPACE_URL}{CHAT_ENDPOINT}",
                     json=payload,
                     headers=self._get_headers(),
                     timeout=self.valves.TIMEOUT,
@@ -387,7 +484,7 @@ class Pipe:
         """Test connection to the My Hugging Face Space."""
         try:
             response = requests.get(
-                f"{self.valves.HUGGINGFACE_SPACE_URL}/health",
+                f"{self.valves.HUGGINGFACE_SPACE_URL}{HEALTH_ENDPOINT}",
                 headers=self._get_headers(),
                 timeout=10,
             )
