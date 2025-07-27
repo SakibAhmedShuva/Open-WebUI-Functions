@@ -25,7 +25,7 @@ BOT_ID_SUFFIX = "hf-space"  # Will be combined with detected name
 BOT_TYPE = "manifold"
 
 # API Configuration
-DEFAULT_SPACE_URL = "https://dungpham519-rag.hf.space"
+DEFAULT_SPACE_URL = "https://org-rag.hf.space"
 DEFAULT_AUTH_TOKEN = "LULA"
 DEFAULT_TIMEOUT = 30
 DEFAULT_MAX_RETRIES = 3
