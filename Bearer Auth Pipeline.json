@@ -1,0 +1,252 @@
+"""
+title: BukBuk HF Space Integration
+author: Assistant
+date: 2025-07-27
+version: 1.0.0
+license: MIT
+description: A pipe to connect Open WebUI with BukBuk Hugging Face Space
+requirements: requests
+"""
+
+import json
+import requests
+import time
+from typing import List, Union, Generator, Dict
+from pydantic import BaseModel, Field
+
+
+class Pipe:
+    class Valves(BaseModel):
+        """Configuration for BukBuk HF Space API."""
+
+        HUGGINGFACE_SPACE_URL: str = Field(
+            default="https://orgname-spacename.hf.space",
+            description="Base URL for BukBuk Hugging Face Space",
+        )
+
+        AUTHORIZATION_TOKEN: str = Field(
+            default="hf_hhdsfggfbgsfgewrwerwer",
+            description="Bearer token for API authentication",
+        )
+
+        TIMEOUT: int = Field(default=30, description="Request timeout in seconds")
+
+        MAX_RETRIES: int = Field(
+            default=3, description="Maximum number of retry attempts"
+        )
+
+        DEBUG: bool = Field(default=False, description="Enable debug logging")
+
+    def __init__(self):
+        """Initialize the BukBuk HF Space pipe."""
+        self.type = "manifold"
+        self.id = "bukbuk-hf-space"
+        self.name = "BukBuk"
+
+        # Rate limiting
+        self.last_request_time = 0.0
+
+        # Initialize valves
+        self.valves = self.Valves()
+
+        # Set up headers
+        self.headers = {
+            "Authorization": f"Bearer {self.valves.AUTHORIZATION_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    def _debug(self, message: str, category: str = "INFO") -> None:
+        """Debug logging helper."""
+        if self.valves.DEBUG:
+            print(f"[BukBukPipe][{category}] {message}")
+
+    def _get_headers(self) -> Dict[str, str]:
+        """Generate headers for API requests."""
+        return {
+            "Authorization": f"Bearer {self.valves.AUTHORIZATION_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    def _check_rate_limit(self):
+        """Simple rate limiting to avoid overwhelming the API."""
+        current_time = time.time()
+        elapsed = current_time - self.last_request_time
+
+        if elapsed < 1.0:  # Wait at least 1 second between requests
+            time.sleep(1.0 - elapsed)
+
+        self.last_request_time = time.time()
+
+    def pipes(self) -> List[dict]:
+        """
+        Return available models/pipes from BukBuk HF Space.
+        This method defines what models appear in the Open WebUI interface.
+        """
+        models = [
+            {
+                "id": "bukbuk-default",
+                "name": "BukBuk: Default Model",
+                "description": "Default model from BukBuk Hugging Face Space",
+                "type": "chat",
+            },
+            {
+                "id": "bukbuk-instruct",
+                "name": "BukBuk: Instruct Model",
+                "description": "Instruction-tuned model from BukBuk Space",
+                "type": "chat",
+            },
+        ]
+
+        self._debug(f"Loaded {len(models)} models", "MODELS")
+        return models
+
+    def pipe(self, body: dict) -> Union[str, Generator[str, None, None]]:
+        """
+        Main request handler for chat completions.
+
+        Args:
+            body: Request body containing model and messages
+
+        Returns:
+            Response content either as string or streaming generator
+        """
+        try:
+            model = body.get("model", "bukbuk-default")
+            messages = body.get("messages", [])
+            stream = body.get("stream", False)
+
+            self._debug(f"Processing request for model: {model}", "REQUEST")
+
+            # Prepare payload for the BukBuk API
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": stream,
+                "temperature": body.get("temperature", 0.7),
+                "max_tokens": body.get("max_tokens", 1000),
+                "top_p": body.get("top_p", 1.0),
+            }
+
+            if stream:
+                return self._handle_streaming(payload)
+            else:
+                return self._handle_non_streaming(payload)
+
+        except Exception as e:
+            self._debug(f"Request failed: {str(e)}", "ERROR")
+            return f"Error: {str(e)}"
+
+    def _handle_streaming(self, payload: dict) -> Generator[str, None, None]:
+        """Handle streaming chat completion request."""
+        self._check_rate_limit()
+
+        try:
+            response = requests.post(
+                f"{self.valves.HUGGINGFACE_SPACE_URL}/v1/chat/completions",
+                json=payload,
+                headers=self._get_headers(),
+                stream=True,
+                timeout=self.valves.TIMEOUT,
+            )
+
+            if response.status_code != 200:
+                yield f"Error: HTTP {response.status_code}: {response.text}"
+                return
+
+            # Process streaming response
+            for line in response.iter_lines():
+                if line:
+                    line = line.decode("utf-8").strip()
+
+                    if line.startswith("data: "):
+                        data = line[6:]  # Remove 'data: ' prefix
+
+                        if data.strip() == "[DONE]":
+                            break
+
+                        try:
+                            json_data = json.loads(data)
+
+                            if "choices" in json_data and len(json_data["choices"]) > 0:
+                                delta = json_data["choices"][0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    yield content
+
+                        except json.JSONDecodeError:
+                            if self.valves.DEBUG:
+                                self._debug(f"Failed to parse JSON: {data}", "ERROR")
+                            continue
+
+        except requests.exceptions.RequestException as e:
+            self._debug(f"Streaming error: {str(e)}", "ERROR")
+            yield f"Error: {str(e)}"
+
+    def _handle_non_streaming(self, payload: dict) -> str:
+        """Handle non-streaming chat completion request."""
+        self._check_rate_limit()
+
+        for attempt in range(self.valves.MAX_RETRIES):
+            try:
+                response = requests.post(
+                    f"{self.valves.HUGGINGFACE_SPACE_URL}/v1/chat/completions",
+                    json=payload,
+                    headers=self._get_headers(),
+                    timeout=self.valves.TIMEOUT,
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+
+                    # Handle OpenAI-style response
+                    if "choices" in result and len(result["choices"]) > 0:
+                        return result["choices"][0]["message"]["content"]
+                    # Handle simple response
+                    elif "response" in result:
+                        return result["response"]
+                    # Handle raw response
+                    else:
+                        return str(result)
+                else:
+                    error_msg = f"HTTP {response.status_code}: {response.text}"
+                    if attempt == self.valves.MAX_RETRIES - 1:
+                        return f"Error: {error_msg}"
+                    self._debug(f"Attempt {attempt + 1} failed: {error_msg}", "ERROR")
+
+            except requests.exceptions.Timeout:
+                if attempt == self.valves.MAX_RETRIES - 1:
+                    return "Error: Request timed out"
+                self._debug(f"Attempt {attempt + 1} timed out", "ERROR")
+
+            except requests.exceptions.ConnectionError:
+                if attempt == self.valves.MAX_RETRIES - 1:
+                    return "Error: Could not connect to BukBuk service"
+                self._debug(f"Attempt {attempt + 1} connection failed", "ERROR")
+
+            except Exception as e:
+                if attempt == self.valves.MAX_RETRIES - 1:
+                    return f"Error: {str(e)}"
+                self._debug(f"Attempt {attempt + 1} failed: {str(e)}", "ERROR")
+
+        return "Error: All retry attempts failed"
+
+    def test_connection(self) -> dict:
+        """Test connection to the BukBuk HF Space."""
+        try:
+            response = requests.get(
+                f"{self.valves.HUGGINGFACE_SPACE_URL}/health",
+                headers=self._get_headers(),
+                timeout=10,
+            )
+
+            if response.status_code == 200:
+                return {"status": "success", "message": "Connection successful"}
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Health check failed: HTTP {response.status_code}",
+                }
+        except Exception as e:
+            return {"status": "error", "message": f"Connection failed: {str(e)}"}
